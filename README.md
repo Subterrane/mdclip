@@ -37,3 +37,14 @@ Markdown  →  pulldown-cmark (HTML)  →  textutil (RTF)  →  NSPasteboard (cl
 - Tables with borders
 - Inline `code` and fenced code blocks
 - Links
+
+## Releasing
+
+Tag a version to trigger a GitHub Actions build that creates a release with macOS binaries:
+
+```
+git tag v0.X.0
+git push origin v0.X.0
+```
+
+This produces `aarch64-apple-darwin` (Apple Silicon) and `x86_64-apple-darwin` (Intel) tarballs.
