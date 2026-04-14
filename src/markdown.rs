@@ -24,11 +24,35 @@ pub fn to_styled_html(markdown: &str) -> String {
 
     let mut body = String::new();
     html::push_html(&mut body, parser);
+    let body = space_before_headings(&body);
 
     let mut out = String::with_capacity(STYLE.len() + body.len() + FOOTER.len());
     out.push_str(STYLE);
     out.push_str(&body);
     out.push_str(FOOTER);
+    out
+}
+
+// Teams' RTF paste ignores CSS margin on <h*>, so inject a non-breaking
+// paragraph before each heading (except the first element) to force a
+// visible gap between sections.
+fn space_before_headings(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut i = 0;
+    while i < body.len() {
+        let is_heading_open = bytes[i] == b'<'
+            && matches!(bytes.get(i + 1), Some(b'h'))
+            && matches!(bytes.get(i + 2), Some(b'1'..=b'6'))
+            && matches!(bytes.get(i + 3), Some(b'>') | Some(b' '));
+        if is_heading_open && !out.trim_end().is_empty() {
+            out.push_str("<p>&nbsp;</p>\n");
+        }
+        // Advance by one UTF-8 char to avoid splitting multibyte sequences.
+        let ch_len = body[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        out.push_str(&body[i..i + ch_len]);
+        i += ch_len;
+    }
     out
 }
 
@@ -58,6 +82,23 @@ mod tests {
         let html = to_styled_html(md);
         assert!(html.contains("<table>"));
         assert!(html.contains("<td>1</td>"));
+    }
+
+    #[test]
+    fn spacer_before_headings() {
+        let html = to_styled_html("intro\n\n## A\n\ntext\n\n## B\n");
+        // spacer inserted before both ## headings
+        assert_eq!(html.matches("<p>&nbsp;</p>").count(), 2);
+        // the very first element shouldn't get a leading spacer
+        let leading = to_styled_html("# First\n\nbody");
+        assert!(!leading.contains("<p>&nbsp;</p>\n<h1"));
+    }
+
+    #[test]
+    fn utf8_preserved() {
+        let html = to_styled_html("café — naïve\n\n## Über\n");
+        assert!(html.contains("café — naïve"));
+        assert!(html.contains("Über"));
     }
 
     #[test]
