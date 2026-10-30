@@ -1,4 +1,4 @@
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{html, CowStr, Event, Options, Parser};
 
 const STYLE: &str = r#"<html><head><style>
 body { font-family: -apple-system, sans-serif; font-size: 13px; }
@@ -23,8 +23,7 @@ pub fn to_styled_html(markdown: &str) -> String {
     let parser = Parser::new_ext(markdown, options);
 
     let mut body = String::new();
-    html::push_html(&mut body, parser);
-    let body = space_before_headings(&body);
+    html::push_html(&mut body, space_between_blocks(parser).into_iter());
 
     let mut out = String::with_capacity(STYLE.len() + body.len() + FOOTER.len());
     out.push_str(STYLE);
@@ -33,25 +32,29 @@ pub fn to_styled_html(markdown: &str) -> String {
     out
 }
 
-// Teams' RTF paste ignores CSS margin on <h*>, so inject a non-breaking
-// paragraph before each heading (except the first element) to force a
-// visible gap between sections.
-fn space_before_headings(body: &str) -> String {
-    let bytes = body.as_bytes();
-    let mut out = String::with_capacity(body.len() + 64);
-    let mut i = 0;
-    while i < body.len() {
-        let is_heading_open = bytes[i] == b'<'
-            && matches!(bytes.get(i + 1), Some(b'h'))
-            && matches!(bytes.get(i + 2), Some(b'1'..=b'6'))
-            && matches!(bytes.get(i + 3), Some(b'>') | Some(b' '));
-        if is_heading_open && !out.trim_end().is_empty() {
-            out.push_str("<p>&nbsp;</p>\n");
+// Teams' RTF paste drops paragraph spacing (CSS margins become \sa/\sb,
+// which it discards) on every block, so consecutive paragraphs, headings,
+// lists and tables run together. Put a non-breaking-space paragraph between
+// each pair of top-level blocks to force a visible gap. Nested blocks (list
+// items, paragraphs inside a quote) are left alone.
+fn space_between_blocks<'a>(events: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut seen_block = false;
+    for event in events {
+        let starts_top_level_block = depth == 0 && matches!(event, Event::Start(_) | Event::Rule);
+        if starts_top_level_block {
+            if seen_block {
+                out.push(Event::Html(CowStr::Borrowed("<p>&nbsp;</p>\n")));
+            }
+            seen_block = true;
         }
-        // Advance by one UTF-8 char to avoid splitting multibyte sequences.
-        let ch_len = body[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
-        out.push_str(&body[i..i + ch_len]);
-        i += ch_len;
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        out.push(event);
     }
     out
 }
@@ -84,14 +87,47 @@ mod tests {
         assert!(html.contains("<td>1</td>"));
     }
 
+    const SPACER: &str = "<p>&nbsp;</p>";
+
     #[test]
-    fn spacer_before_headings() {
+    fn spacer_between_paragraphs() {
+        let html = to_styled_html("one\n\ntwo\n\nthree");
+        assert_eq!(html.matches(SPACER).count(), 2);
+        assert!(html.contains("<p>one</p>\n<p>&nbsp;</p>\n<p>two</p>"));
+    }
+
+    #[test]
+    fn spacer_between_headings_and_text() {
         let html = to_styled_html("intro\n\n## A\n\ntext\n\n## B\n");
-        // spacer inserted before both ## headings
-        assert_eq!(html.matches("<p>&nbsp;</p>").count(), 2);
-        // the very first element shouldn't get a leading spacer
-        let leading = to_styled_html("# First\n\nbody");
-        assert!(!leading.contains("<p>&nbsp;</p>\n<h1"));
+        assert_eq!(html.matches(SPACER).count(), 3);
+    }
+
+    #[test]
+    fn no_leading_or_trailing_spacer() {
+        let html = to_styled_html("# First\n\nbody\n");
+        assert!(!html.contains(&format!("{SPACER}\n<h1")));
+        assert!(!html.trim_end_matches(FOOTER).trim_end().ends_with(SPACER));
+        assert_eq!(html.matches(SPACER).count(), 1);
+    }
+
+    #[test]
+    fn single_block_has_no_spacer() {
+        assert_eq!(to_styled_html("just one paragraph").matches(SPACER).count(), 0);
+    }
+
+    #[test]
+    fn nested_blocks_not_spaced() {
+        // list items and paragraphs inside a quote stay together
+        assert_eq!(to_styled_html("- a\n- b\n- c").matches(SPACER).count(), 0);
+        assert_eq!(to_styled_html("> one\n>\n> two").matches(SPACER).count(), 0);
+        assert_eq!(to_styled_html("- a\n\n  more a\n\n- b").matches(SPACER).count(), 0);
+    }
+
+    #[test]
+    fn spacer_around_tables_lists_code_and_rules() {
+        let md = "intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- x\n- y\n\n```\ncode\n```\n\n---\n\nend";
+        // intro, table, list, code, rule, end = 6 top-level blocks
+        assert_eq!(to_styled_html(md).matches(SPACER).count(), 5);
     }
 
     #[test]
