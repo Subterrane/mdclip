@@ -1,4 +1,4 @@
-use pulldown_cmark::{html, CowStr, Event, Options, Parser};
+use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
 
 const STYLE: &str = r#"<html><head><style>
 body { font-family: -apple-system, sans-serif; font-size: 13px; }
@@ -34,20 +34,25 @@ pub fn to_styled_html(markdown: &str) -> String {
 
 // Teams' RTF paste drops paragraph spacing (CSS margins become \sa/\sb,
 // which it discards) on every block, so consecutive paragraphs, headings,
-// lists and tables run together. Put a non-breaking-space paragraph between
-// each pair of top-level blocks to force a visible gap. Nested blocks (list
-// items, paragraphs inside a quote) are left alone.
+// and tables run together. Put a non-breaking-space paragraph between each
+// pair of top-level blocks to force a visible gap. Lists are the exception:
+// Teams keeps its own gap above and below a list, so a spacer there shows as
+// a double blank line. Nested blocks (list items, paragraphs inside a quote)
+// are left alone.
 fn space_between_blocks<'a>(events: impl Iterator<Item = Event<'a>>) -> Vec<Event<'a>> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut seen_block = false;
+    let mut prev_was_list = false;
     for event in events {
         let starts_top_level_block = depth == 0 && matches!(event, Event::Start(_) | Event::Rule);
         if starts_top_level_block {
-            if seen_block {
+            let is_list = matches!(event, Event::Start(Tag::List(_)));
+            if seen_block && !prev_was_list && !is_list {
                 out.push(Event::Html(CowStr::Borrowed("<p>&nbsp;</p>\n")));
             }
             seen_block = true;
+            prev_was_list = is_list;
         }
         match event {
             Event::Start(_) => depth += 1,
@@ -124,10 +129,27 @@ mod tests {
     }
 
     #[test]
-    fn spacer_around_tables_lists_code_and_rules() {
+    fn spacer_around_tables_code_and_rules_but_not_lists() {
         let md = "intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n- x\n- y\n\n```\ncode\n```\n\n---\n\nend";
-        // intro, table, list, code, rule, end = 6 top-level blocks
-        assert_eq!(to_styled_html(md).matches(SPACER).count(), 5);
+        // intro, table, list, code, rule, end: 5 gaps, minus table|list and list|code
+        assert_eq!(to_styled_html(md).matches(SPACER).count(), 3);
+    }
+
+    #[test]
+    fn no_spacer_before_or_after_lists() {
+        let html = to_styled_html("intro\n\n- a\n- b\n\nafter\n\n1. x\n2. y\n\n**Heading**\n- c\n");
+        assert_eq!(html.matches(SPACER).count(), 0);
+        assert!(html.contains("<p>intro</p>\n<ul>"));
+        assert!(html.contains("</ul>\n<p>after</p>"));
+        assert!(html.contains("</ol>\n<p><strong>Heading</strong></p>\n<ul>"));
+    }
+
+    #[test]
+    fn paragraphs_around_a_list_still_spaced_from_each_other() {
+        let html = to_styled_html("one\n\ntwo\n\n- a\n\nthree\n\nfour");
+        assert_eq!(html.matches(SPACER).count(), 2);
+        assert!(html.contains("<p>one</p>\n<p>&nbsp;</p>\n<p>two</p>"));
+        assert!(html.contains("<p>three</p>\n<p>&nbsp;</p>\n<p>four</p>"));
     }
 
     #[test]
